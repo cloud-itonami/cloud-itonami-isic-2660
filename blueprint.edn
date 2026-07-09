@@ -1,0 +1,11 @@
+{:itonami.blueprint/id "cloud-itonami-2660"
+ :itonami.blueprint/name "Community Medical Device Manufacturing"
+ :itonami.blueprint/isic-rev5 "2660"
+ :itonami.blueprint/domain :manufacturing/medical-device
+ :itonami.blueprint/license "AGPL-3.0-or-later"
+ :itonami.blueprint/social-impact [:patient-safety :device-traceability :public-health]
+ :itonami.blueprint/governor :medical-device-governor
+ :itonami.blueprint/robotics true
+ :itonami.blueprint/required-technologies [:robotics :identity :forms :dmn :bpmn :audit-ledger :eda :cae]
+ :itonami.blueprint/optional-technologies [:optimization]
+ :itonami.blueprint/status :public-oss}
