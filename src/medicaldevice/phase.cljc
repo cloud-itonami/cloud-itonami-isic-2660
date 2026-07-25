@@ -9,13 +9,18 @@
   Phase 3 (Production):  all high-stakes escalate, all low-stakes may auto-commit"
   (:require [medicaldevice.governor :as governor]))
 
-(def default-phase :phase/0)
+;; Phases are keyed by plain integers, matching every sibling blueprint's
+;; `phase` module (e.g. `advertising.phase`). They cannot be keywords of the
+;; form `:phase/0`: Clojure's reader requires a symbol/keyword name to start
+;; with a non-digit, so `:phase/0` is an invalid token and reading this file
+;; aborted on the JVM.
+(def default-phase 0)
 
 (def phase-descriptions
-  {:phase/0 "Development -- high caution, all high-stakes escalate"
-   :phase/1 "Pilot -- continued caution, all high-stakes escalate"
-   :phase/2 "Stage -- reduced caution, all high-stakes still escalate"
-   :phase/3 "Production -- full confidence, but high-stakes always escalate"})
+  {0 "Development -- high caution, all high-stakes escalate"
+   1 "Pilot -- continued caution, all high-stakes escalate"
+   2 "Stage -- reduced caution, all high-stakes still escalate"
+   3 "Production -- full confidence, but high-stakes always escalate"})
 
 (defn verdict->disposition
   "Convert governor verdict to base disposition (before phase gate).

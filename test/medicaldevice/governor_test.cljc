@@ -13,7 +13,7 @@
                   :cites [facts/fda-21-cfr-part-820]
                   :confidence 0.9}
         request {:op :production-batch/intake :subject "batch-001"}
-        context {:actor-id "advisor-1" :phase :phase/3}
+        context {:actor-id "advisor-1" :phase 3}
         verdict (governor/check request context proposal s)]
     (is (seq (:hard-violations verdict))
         "Device release should trigger hard violation")
@@ -27,7 +27,7 @@
                   :cites [facts/fda-21-cfr-part-820]
                   :confidence 0.9}
         request {:op :production-batch/intake :subject "batch-001"}
-        context {:actor-id "advisor-1" :phase :phase/3}
+        context {:actor-id "advisor-1" :phase 3}
         verdict (governor/check request context proposal s)]
     (is (seq (:hard-violations verdict))
         "Regulatory certification should trigger hard violation")
@@ -41,7 +41,7 @@
                   :cites []
                   :confidence 0.8}
         request {:op :production-batch/intake :subject "batch-001"}
-        context {:actor-id "advisor-1" :phase :phase/3}
+        context {:actor-id "advisor-1" :phase 3}
         verdict (governor/check request context proposal s)]
     (is (seq (:hard-violations verdict))
         "Empty spec-basis citations should trigger hard violation")
@@ -57,7 +57,7 @@
                   :cites [facts/fda-21-cfr-part-820]
                   :confidence 0.95}
         request {:op :safety/flag-deviation :subject "batch-001"}
-        context {:actor-id "advisor-1" :phase :phase/3}
+        context {:actor-id "advisor-1" :phase 3}
         verdict (governor/check request context proposal s)]
     (is (:high-stakes? verdict)
         "Safety deviation should be marked high-stakes")
@@ -71,7 +71,7 @@
                   :cites [facts/fda-21-cfr-part-820]
                   :confidence 0.9}
         request {:op :device-release/request-review :subject "batch-001"}
-        context {:actor-id "advisor-1" :phase :phase/3}
+        context {:actor-id "advisor-1" :phase 3}
         verdict (governor/check request context proposal s)]
     (is (:high-stakes? verdict)
         "Device-release review should be marked high-stakes")
@@ -85,7 +85,7 @@
                   :cites [facts/fda-21-cfr-part-820]
                   :confidence 0.4}
         request {:op :production-batch/intake :subject "batch-001"}
-        context {:actor-id "advisor-1" :phase :phase/3}
+        context {:actor-id "advisor-1" :phase 3}
         verdict (governor/check request context proposal s)]
     (is (some #(= :low-confidence (:rule %))
               (:violations verdict)))))
@@ -99,7 +99,7 @@
                   :cites [facts/iso-13485-2016]
                   :confidence 0.9}
         request {:op :production-batch/intake :subject "nonexistent-batch"}
-        context {:actor-id "advisor-1" :phase :phase/3}
+        context {:actor-id "advisor-1" :phase 3}
         verdict (governor/check request context proposal s)]
     (is (seq (:hard-violations verdict))
         "Non-existent batch should trigger hard violation")
@@ -110,10 +110,12 @@
 
 (deftest hold-fact-generation
   (let [request {:op :production-batch/intake :subject "batch-001"}
-        context {:actor-id "advisor-1" :phase :phase/3}
+        context {:actor-id "advisor-1" :phase 3}
         verdict {:violations [{:rule :no-spec-basis :detail "test"}]
                  :confidence 0.8}
         fact (governor/hold-fact request context verdict)]
     (is (= :governor-hold (:t fact)))
-    (is (= "advisor-1" (:actor context)))
+    ;; assert on the produced fact, not on the input we just wrote: `hold-fact`
+    ;; is what renames context's `:actor-id` to the ledger's `:actor`.
+    (is (= "advisor-1" (:actor fact)))
     (is (seq (:violations fact)))))
