@@ -2,12 +2,23 @@
  :deps {io.github.kotoba-lang/langgraph
         {:local/root "../../kotoba-lang/langgraph"}
         io.github.kotoba-lang/robotics
-        {:local/root "../../kotoba-lang/robotics"}}
+        {:local/root "../../kotoba-lang/robotics"}
+        ;; デジタル庁デザインシステム -- the workspace-wide base design
+        ;; system (CLAUDE.md, 2026-08-05). Used only by
+        ;; `medicaldevice.render-html` to inline the console's CSS.
+        io.github.kotoba-lang/jp-go-digital-design-system
+        {:git/url "https://github.com/kotoba-lang/jp-go-digital-design-system"
+         :git/sha "83db99546eabc53613ae826ea41d1533a3c574af"}}
  :aliases
  {;; offline workspace dev -- pin transitive langchain to local checkout
   :dev {:override-deps
         {io.github.kotoba-lang/langchain
          {:local/root "../../kotoba-lang/langchain"}}}
+  ;; clojure -M:dev:render-html [out-file]
+  ;; -> regenerate docs/samples/operator-console.html by driving the REAL
+  ;;    actor graph (flagship checklist item 2). Fails the build if the
+  ;;    scenario produces no HARD governor hold.
+  :render-html {:main-opts ["-m" "medicaldevice.render-html"]}
   :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}

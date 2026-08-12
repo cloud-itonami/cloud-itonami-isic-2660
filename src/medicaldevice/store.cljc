@@ -59,3 +59,98 @@
   [store]
   (when (instance? MemStore store)
     @(.-ledger-atom ^MemStore store)))
+
+;; ======================= Demo seed data =======================
+;;
+;; The only batch/deviation data this repo declares. Every demo driver
+;; (`medicaldevice.render-html`) and every ground-truth id it may drive
+;; comes from here -- a demo may not invent a subject. Deliberately
+;; shaped so each of the Manufacturing Governor's batch-record checks
+;; has a record that exercises it:
+;;
+;;   batch-2660-001  complete + traceable, no open deviation  -> clean
+;;   batch-2660-002  record INCOMPLETE (no quality-checks-passed,
+;;                   no maintained-by)                        -> hard block
+;;   batch-2660-003  every field present but traceability-id nil
+;;                                                            -> hard block
+;;   batch-2660-004  complete + traceable, but carries an OPEN
+;;                   safety deviation                         -> hard block
+;;
+;; Fields are ISIC-2660 product classes and internal record ids only.
+;; No customer, no manufacturer, no lot quantities, no measurements --
+;; nothing that would put a fabricated figure on the operator console.
+
+(def demo-batches
+  "Four manufacturing batch records covering the four states the
+  Manufacturing Governor distinguishes. Required-field set is
+  `medicaldevice.registry/batch-record-complete?`'s."
+  [{:batch-id "batch-2660-001"
+    :product-line :patient-monitor
+    :device-class :class-ii
+    :production-date "2026-07-02"
+    :equipment-used ["assembly-cell-01" "calibration-bench-01"]
+    :materials ["mat-ecg-electrode" "mat-display-module" "mat-power-supply"]
+    :traceability-id "trace-2660-001"
+    :quality-checks-passed false
+    :maintained-by "qe-1"
+    :release-status :in-process}
+
+   ;; missing :quality-checks-passed and :maintained-by
+   {:batch-id "batch-2660-002"
+    :product-line :diagnostic-imaging-xray
+    :device-class :class-ii
+    :production-date "2026-07-06"
+    :equipment-used ["assembly-cell-02"]
+    :materials ["mat-xray-tube" "mat-collimator"]
+    :traceability-id "trace-2660-002"
+    :release-status :in-process}
+
+   ;; complete field set, but the material traceability chain is not closed
+   {:batch-id "batch-2660-003"
+    :product-line :electrotherapy-stimulator
+    :device-class :class-ii
+    :production-date "2026-07-09"
+    :equipment-used ["assembly-cell-01"]
+    :materials ["mat-stimulator-board" "mat-lead-set"]
+    :traceability-id nil
+    :quality-checks-passed true
+    :maintained-by "qe-2"
+    :release-status :in-process}
+
+   {:batch-id "batch-2660-004"
+    :product-line :radiotherapy-linac
+    :device-class :class-iii
+    :production-date "2026-07-11"
+    :equipment-used ["assembly-cell-03" "calibration-bench-02"]
+    :materials ["mat-linac-waveguide" "mat-dosimetry-module"]
+    :traceability-id "trace-2660-004"
+    :quality-checks-passed true
+    :maintained-by "qe-2"
+    :release-status :in-process}])
+
+(def demo-safety-deviations
+  "One OPEN and one RESOLVED safety deviation. `get-safety-deviations`
+  returns only the unresolved ones, so the resolved entry proves the
+  filter: batch-2660-001 stays clean despite carrying a deviation
+  record, while batch-2660-004 cannot proceed."
+  [{:deviation-id "dev-2660-001"
+    :batch-id "batch-2660-004"
+    :deviation-type :radiation-output-drift
+    :detail "Radiotherapy output drifted outside the verified dose window"
+    :resolved? false}
+   {:deviation-id "dev-2660-002"
+    :batch-id "batch-2660-001"
+    :deviation-type :electrical-safety
+    :detail "Leakage-current check failed on the first article; corrected and re-tested"
+    :resolved? true}])
+
+(defn sample-data!
+  "Seed a MemStore with `demo-batches` / `demo-safety-deviations` and
+  return it (development/demo only -- a production Store arrives already
+  populated)."
+  [store]
+  (when (instance? MemStore store)
+    (reset! (.-batches-atom ^MemStore store)
+            (reduce (fn [m b] (assoc m (:batch-id b) b)) {} demo-batches))
+    (reset! (.-deviations-atom ^MemStore store) (vec demo-safety-deviations)))
+  store)

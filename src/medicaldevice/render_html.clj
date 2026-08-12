@@ -1,0 +1,431 @@
+(ns medicaldevice.render-html
+  "Build-time HTML renderer for `docs/samples/operator-console.html`.
+
+  Closes flagship checklist item 2 (com-junkawasaki/root ADR-2607189300):
+  this repo had NO demo page and no generator at all. This namespace
+  drives the REAL actor stack --
+
+    `medicaldevice.operation/build` (the langgraph StateGraph)
+      -> `medicaldevice.advisor`  (proposal, sealed node)
+      -> `medicaldevice.governor` (independent censor)
+      -> `medicaldevice.phase`    (rollout gate)
+      -> `medicaldevice.store`    (SSoT + append-only ledger)
+
+  -- through a scenario built ONLY from `medicaldevice.store/demo-batches`
+  and `demo-safety-deviations` (this repo's own seed data; a demo may not
+  invent a subject), and renders the result. Every batch id, product line,
+  device class, deviation, citation, hold rule and approver name on the
+  page is read back out of the run -- there is no hand-typed row.
+
+  Determinism is a build-time property: no timestamps, no randomness, and
+  every collection that comes out of a hash map is sorted before it is
+  rendered (`store/get-batches` returns `vals`, whose order is not
+  specified). Two consecutive runs are byte-identical.
+
+  Usage: `clojure -M:dev:render-html [out-file]`
+  (default `docs/samples/operator-console.html`)."
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [jp-go-dds.skin]
+            [langgraph.graph :as g]
+            [medicaldevice.advisor :as advisor]
+            [medicaldevice.facts :as facts]
+            [medicaldevice.governor :as governor]
+            [medicaldevice.operation :as op]
+            [medicaldevice.registry :as registry]
+            [medicaldevice.store :as store]))
+
+;; ============================== the run ==============================
+
+(def ^:private operator
+  "The operator whose credentials the actor runs under. `qe-1` is not a
+  name invented here -- it is the `:maintained-by` of `batch-2660-001` in
+  `store/demo-batches`, i.e. a quality engineer this repo already knows
+  about. Phase 3 (Production) so that low-stakes clean ops actually
+  auto-commit and the console shows the auto-commit path, not just holds."
+  {:actor-id "qe-1" :actor-role :quality-engineer :phase 3})
+
+(defn- exec!
+  "Start thread `tid` with `request`. Records the run so the renderer can
+  read the graph's in-run `:audit` channel (which holds facts the Store's
+  ledger never sees -- see `render`)."
+  [actor runs tid request]
+  (let [r (g/run* actor {:request request :context operator} {:thread-id tid})]
+    (swap! runs conj [tid r])
+    r))
+
+(defn- resume!
+  "Resume the human-in-the-loop interrupt on thread `tid` with a decision."
+  [actor runs tid approval]
+  (let [r (g/run* actor {:approval approval} {:thread-id tid :resume? true})]
+    (swap! runs conj [tid r])
+    r))
+
+(defn- batch
+  "The batch record as the SSoT holds it RIGHT NOW. Requests carry this
+  back as their `:value` so that a commit writes the record the store
+  already has rather than a literal typed into this file -- committing an
+  invented map here would silently overwrite the seeded record, because
+  `store/commit-record!` does `assoc batches-atom subject value`."
+  [db id]
+  (store/get-batch db id))
+
+(defn run-demo!
+  "Runs a fresh seeded store through every disposition this actor can
+  reach. Returns `{:db db :runs [[thread-id result] ...]}`.
+
+  Committed / escalated:
+    b1-intake    batch-2660-001 intake -- clean, phase-3 AUTO-COMMIT
+    b3-safety    batch-2660-003 safety flag -- high-stakes, ESCALATE,
+                 approved by qe-1, committed
+    b1-review    batch-2660-001 device-release review request --
+                 high-stakes, ESCALATE, approved by qe-2, committed;
+                 moves the record to `:release-status :review-pending`,
+                 which `registry/device-release-review-pending?` reads
+    b1-maint     batch-2660-001 maintenance schedule at confidence 0.40
+                 (below `governor/confidence-floor` 0.6) -- soft escalate,
+                 then REJECTED by the approver
+
+  HARD governor holds (one per hard rule this repo declares -- none of
+  these ever reaches a human):
+    b2-intake    :batch-record-incomplete            (002 has no
+                 :quality-checks-passed / :maintained-by)
+    b3-review    :batch-traceability-missing         (003 traceability-id nil)
+    b4-maint     :open-safety-deviation              (004 carries dev-2660-001)
+    dev-intake   :batch-not-found                    (a deviation id
+                 submitted as a batch subject)
+    b1-nospec    :no-spec-basis                      (proposal declares a
+                 nil :spec-basis)
+    b1-release   :device-release-authority-violation (proposal claims
+                 :released-for-market -- the permanent scope block)
+    b1-certify   :regulatory-certification-violation (proposal claims
+                 :fda-cleared)"
+  []
+  (let [db (store/sample-data! (store/mem-store))
+        actor (op/build db)
+        runs (atom [])]
+
+    ;; --- clean, low-stakes: auto-commits at phase 3 ---
+    (exec! actor runs "b1-intake"
+           {:op :production-batch/intake :subject "batch-2660-001"
+            :value (batch db "batch-2660-001")})
+
+    ;; --- high-stakes: always escalates, approved ---
+    ;; `:safety/flag-deviation` skips the batch-record hard checks, so 003
+    ;; (traceability-id nil) can still be flagged -- which is the point:
+    ;; you must be able to raise a deviation ON a batch that is not clean.
+    (exec! actor runs "b3-safety"
+           {:op :safety/flag-deviation :subject "batch-2660-003"
+            :value (batch db "batch-2660-003")})
+    (resume! actor runs "b3-safety" {:status :approved :by "qe-1"})
+
+    (exec! actor runs "b1-review"
+           {:op :device-release/request-review :subject "batch-2660-001"
+            :value (assoc (batch db "batch-2660-001")
+                          :release-status :review-pending)})
+    (resume! actor runs "b1-review" {:status :approved :by "qe-2"})
+
+    ;; --- soft escalation on confidence, then rejected by the human ---
+    (exec! actor runs "b1-maint"
+           {:op :maintenance/schedule :subject "batch-2660-001"
+            :confidence 0.40
+            :value (batch db "batch-2660-001")})
+    (resume! actor runs "b1-maint" {:status :rejected :by "qe-2"})
+
+    ;; --- HARD holds: no human is ever offered the override ---
+    (exec! actor runs "b2-intake"
+           {:op :production-batch/intake :subject "batch-2660-002"
+            :value (batch db "batch-2660-002")})
+
+    (exec! actor runs "b3-review"
+           {:op :device-release/request-review :subject "batch-2660-003"
+            :value (batch db "batch-2660-003")})
+
+    (exec! actor runs "b4-maint"
+           {:op :maintenance/schedule :subject "batch-2660-004"
+            :value (batch db "batch-2660-004")})
+
+    ;; a deviation id mistyped into the batch field -- a real operator slip
+    (exec! actor runs "dev-intake"
+           {:op :production-batch/intake :subject "dev-2660-001"
+            :value {}})
+
+    (exec! actor runs "b1-nospec"
+           {:op :production-batch/intake :subject "batch-2660-001"
+            :value {:spec-basis nil}})
+
+    (exec! actor runs "b1-release"
+           {:op :device-release/request-review :subject "batch-2660-001"
+            :value (assoc (batch db "batch-2660-001") :released-for-market true)})
+
+    (exec! actor runs "b1-certify"
+           {:op :production-batch/intake :subject "batch-2660-001"
+            :value (assoc (batch db "batch-2660-001") :fda-cleared true)})
+
+    {:db db :runs @runs}))
+
+(defn final-runs
+  "The LAST result per thread, in first-seen thread order. A resumed run's
+  `:audit` already contains the pre-interrupt facts (langgraph resumes
+  from the saved state), so the last result is the whole trail."
+  [runs]
+  (let [order (distinct (map first runs))
+        by-thread (reduce (fn [m [tid r]] (assoc m tid r)) {} runs)]
+    (mapv (fn [tid] [tid (get by-thread tid)]) order)))
+
+;; ============================== rendering ==============================
+
+(defn- esc [v]
+  (-> (str v)
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")))
+
+(defn- yn [ok? yes no]
+  (if ok?
+    (str "<span class=\"ok\">" yes "</span>")
+    (str "<span class=\"critical\">" no "</span>")))
+
+(defn- codes
+  "Comma-joined regulatory codes of a `:cites` / `:citations` vector."
+  [cites]
+  (str/join ", " (map :code cites)))
+
+(defn- rules-of [fact]
+  (str/join ", " (map (comp name :rule) (:violations fact))))
+
+;; ---------------------------- batch records ----------------------------
+
+(defn- last-fact-for [ledger id]
+  (last (filter #(= (:subject %) id) ledger)))
+
+(defn- status-cell [ledger id]
+  (let [f (last-fact-for ledger id)]
+    (case (:t f)
+      :committed "<span class=\"ok\">committed</span>"
+      :governor-hold (str "<span class=\"critical\">HARD hold &middot; "
+                          (esc (rules-of f)) "</span>")
+      :approval-rejected "<span class=\"warn\">approval rejected</span>"
+      "<span class=\"muted\">no activity</span>")))
+
+(defn- batch-row [db ledger {:keys [batch-id product-line device-class
+                                    production-date release-status]}]
+  (let [dev (registry/open-safety-deviation-affecting-batch db batch-id)]
+    (format (str "        <tr><td><code>%s</code></td><td>%s</td><td>%s</td>"
+                 "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                 "<td>%s</td></tr>")
+            (esc batch-id) (esc product-line) (esc device-class)
+            (esc production-date)
+            (yn (registry/batch-record-complete? db batch-id) "complete" "incomplete")
+            (yn (registry/batch-traceability-valid? db batch-id) "traceable" "not traceable")
+            (if dev
+              (str "<span class=\"critical\">" (esc (:deviation-id dev)) " &middot; "
+                   (esc (name (:deviation-type dev))) "</span>")
+              "<span class=\"ok\">none open</span>")
+            (esc release-status)
+            (status-cell ledger batch-id))))
+
+;; ---------------------------- the action gate ----------------------------
+
+(defn- gate-row [{:keys [op scope]}]
+  (let [high-stakes? (contains? governor/high-stakes op)]
+    (format "        <tr><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td></tr>"
+            (esc op) (esc scope) (esc (codes (advisor/cites-for op)))
+            (if high-stakes?
+              "<span class=\"warn\">ALWAYS human approval &middot; never auto-commits at any phase</span>"
+              (str "<span class=\"ok\">auto-commit when the governor is clean</span>"
+                   " <span class=\"muted\">&middot; escalates below confidence "
+                   governor/confidence-floor "</span>")))))
+
+;; ---------------------------- holds & approvals ----------------------------
+
+(defn- hold-row [{:keys [op subject violations]}]
+  (format "        <tr><td><code>%s</code></td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>"
+          (esc op) (esc subject)
+          (str/join "<br>" (map #(str "<span class=\"critical\">" (esc (name (:rule %))) "</span>")
+                                violations))
+          (str/join "<br>" (map #(esc (:detail %)) violations))))
+
+(defn- audit-facts
+  "Every fact the graph produced, thread by thread (`:audit` channel)."
+  [runs]
+  (for [[tid r] (final-runs runs)
+        f (get-in r [:state :audit])]
+    (assoc f :thread tid)))
+
+(defn- approval-row [{:keys [thread op subject by]}]
+  (format "        <tr><td><code>%s</code></td><td><code>%s</code></td><td><code>%s</code></td><td>%s</td></tr>"
+          (esc thread) (esc op) (esc subject) (esc by)))
+
+(def ^:private persisted-facts
+  "The only fact types `medicaldevice.operation`'s `:commit` / `:hold`
+  nodes hand to `store/append-ledger!`."
+  #{:committed :governor-hold :approval-rejected})
+
+(defn- trail-detail
+  "What a fact actually carries. `:approval-requested` gets the confidence
+  appended because `medicaldevice.phase/gate` hands back the SAME reason
+  string for every escalation -- see the note under the trail table."
+  [{:keys [t summary by reason violations confidence]}]
+  (case t
+    :approval-requested (str reason " (confidence " confidence ")")
+    :approval-granted (str "approved by " by)
+    (:governor-hold :approval-rejected) (rules-of {:violations violations})
+    (or summary "")))
+
+(defn- trail-row [{:keys [thread t op subject] :as fact}]
+  (format "        <tr><td><code>%s</code></td><td>%s</td><td><code>%s</code></td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>"
+          (esc thread) (esc (name t)) (esc op) (esc subject)
+          (esc (trail-detail fact))
+          (if (persisted-facts t)
+            "<span class=\"ok\">persisted</span>"
+            "<span class=\"warn\">in-run only</span>")))
+
+(defn- ledger-row [{:keys [t op subject basis violations]}]
+  (format "        <tr><td>%s</td><td><code>%s</code></td><td><code>%s</code></td><td>%s</td></tr>"
+          (esc (name t)) (esc op) (esc subject)
+          (esc (if (seq violations) (rules-of {:violations violations}) (codes basis)))))
+
+(defn- citation-row [{:keys [jurisdiction code scope canonical-url]}]
+  (format "        <tr><td>%s</td><td><code>%s</code></td><td>%s</td><td><a href=\"%s\">%s</a></td></tr>"
+          (esc (name jurisdiction)) (esc code) (esc scope)
+          (esc canonical-url) (esc canonical-url)))
+
+;; ---------------------------- the document ----------------------------
+
+(defn render
+  "Renders the whole operator console from a completed `run-demo!`."
+  [{:keys [db runs]}]
+  (let [ledger (vec (store/get-ledger db))
+        trail (vec (audit-facts runs))
+        holds (filter #(= :governor-hold (:t %)) ledger)
+        approvals (filter #(= :approval-granted (:t %)) trail)
+        ;; `vals` order is unspecified -- sort before rendering.
+        batches (sort-by :batch-id (store/get-batches db))
+        cited (->> ledger (mapcat :basis) distinct (sort-by :code))
+        gates (sort-by (comp str :op) (vals facts/valid-operation-scopes))]
+    (str
+     "<!doctype html>\n"
+     "<html lang=\"en\"><head><meta charset=\"utf-8\">"
+     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+     "<title>cloud-itonami-isic-2660 &middot; medical device manufacturing &middot; operator console</title>"
+     "<style>" (jp-go-dds.skin/dds+skin) "</style></head><body>\n"
+
+     "<header class=\"bar\">\n"
+     "  <h1>Irradiation, electromedical &amp; electrotherapeutic equipment manufacturing (ISIC 2660) — Operator Console</h1>\n"
+     "  <span class=\"badge\">read-only sample · governor-gated · device release is never this actor's authority</span>\n"
+     "</header>\n"
+     "<main>\n"
+
+     ;; ------------------------------------------------ batch records
+     "  <section class=\"card\">\n"
+     "    <h2>Manufacturing batch records (SSoT after this run)</h2>\n"
+     "    <p class=\"muted\">Build-time generated by <code>medicaldevice.render-html</code> (<code>clojure -M:dev:render-html</code>) from the real actor graph. Seed records come from <code>medicaldevice.store/demo-batches</code>; “complete”, “traceable” and the open-deviation column are re-derived at render time by <code>medicaldevice.registry</code> — the same validators the Governor calls, never a stored verdict.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Batch</th><th>Product line</th><th>Device class</th><th>Production date</th><th>Record</th><th>Traceability</th><th>Open safety deviation</th><th>Release status</th><th>Last persisted op</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map (partial batch-row db ledger) batches)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     ;; ------------------------------------------------ action gate
+     "  <section class=\"card\">\n"
+     "    <h2>Action gate (Manufacturing Governor)</h2>\n"
+     "    <p class=\"muted\">The closed op contract is <code>medicaldevice.facts/valid-operation-scopes</code>; the “always human” column is membership of <code>medicaldevice.governor/high-stakes</code>; the spec basis is whatever <code>medicaldevice.advisor/cites-for</code> derives from the facts table. This table is generated from those three values, not described by hand. HARD violations can never be overridden by a human or by a rollout phase.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Op</th><th>Scope</th><th>Spec basis cited</th><th>Gate</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map gate-row gates)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     ;; ------------------------------------------------ hard holds
+     "  <section class=\"card\">\n"
+     "    <h2>HARD governor holds this run (" (count holds) ")</h2>\n"
+     "    <p class=\"muted\">Every row below was refused before any human was offered an override, and nothing was written to the SSoT. The build fails if this section is empty — see <code>-main</code>.</p>\n"
+     "    <p class=\"muted\"><strong>Read the rule column carefully.</strong> <code>medicaldevice.governor/hold-fact</code> writes <em>all</em> violations and strips the <code>:soft</code> marker on the way to the ledger, so where a soft escalation happened to co-occur with the hard rule that caused the hold (rows 2 and 6), the ledger fact records both and can no longer tell them apart. They are listed here exactly as recorded — a second rule on a row is not a second hard block.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Op</th><th>Subject</th><th>Rules recorded on the hold</th><th>Detail</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map hold-row holds)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     ;; ------------------------------------------------ approvals
+     "  <section class=\"card\">\n"
+     "    <h2>Escalations that reached a human (" (count approvals) ")</h2>\n"
+     "    <p class=\"muted\"><strong>Where these names come from, honestly.</strong> <code>medicaldevice.operation</code>'s <code>:request-approval</code> node attaches the approver as <code>:payload {:approved-by …}</code>, but <code>medicaldevice.store/commit-record!</code> destructures <code>:value</code> and never reads <code>:payload</code> — so the approver <em>is not on the committed batch record</em>. The names below are joined back from the run's own <code>:approval-granted</code> audit facts, which is the only place the attribution survives. Nothing here was read from a batch row, and nothing was invented to fill the gap.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Thread</th><th>Op</th><th>Subject</th><th>Approved by</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map approval-row approvals)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     ;; ------------------------------------------------ persisted ledger
+     "  <section class=\"card\">\n"
+     "    <h2>Persisted audit ledger (" (count ledger) " facts)</h2>\n"
+     "    <p class=\"muted\">Append-only, written only by the graph's <code>:commit</code> and <code>:hold</code> nodes — the SSoT is never touched anywhere else.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Fact</th><th>Op</th><th>Subject</th><th>Spec basis / rule</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map ledger-row ledger)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     ;; ------------------------------------------------ full trail
+     "  <section class=\"card\">\n"
+     "    <h2>Full run trail, thread by thread (" (count trail) " facts)</h2>\n"
+     "    <p class=\"muted\">One thread = one supervised operation. Note the “in-run only” rows: <code>:advisor-proposed</code>, <code>:approval-requested</code> and <code>:approval-granted</code> live in the graph's <code>:audit</code> channel and are handed to the checkpointer, but <code>medicaldevice.operation</code> never appends them to the Store's ledger — so the proposal that preceded a commit, and the approver who released it, are not recoverable from the SSoT alone. Stated rather than papered over.</p>\n"
+     "    <p class=\"muted\">Two further things this table shows as they are, not as they should be. (1) Every <code>:approval-requested</code> reason reads “high-stakes action requires human approval”, including <code>b1-maint</code>, which was <em>not</em> high-stakes — it escalated on the confidence floor (0.4 &lt; " governor/confidence-floor "). <code>medicaldevice.phase/gate</code> returns one reason string for all escalations, and <code>operation</code>'s <code>(or reason …)</code> fallback that would have classified it <code>:low-confidence</code> is therefore unreachable; the confidence in brackets is the fact's own value. (2) <code>b3-safety</code> committed a safety-deviation flag, but <code>medicaldevice.store/Store</code> has no write path for deviations — <code>commit-record!</code> writes the proposal's <code>:value</code> into the batch table under the subject key. The proposal carried <code>batch-2660-003</code>'s record unchanged, so the flag exists only as the ledger facts above. No deviation row was fabricated to make it look otherwise, which is why <code>batch-2660-003</code> still shows “none open”.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Thread</th><th>Fact</th><th>Op</th><th>Subject</th><th>Detail</th><th>Ledger</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map trail-row trail)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     ;; ------------------------------------------------ citations
+     "  <section class=\"card\">\n"
+     "    <h2>Regulatory basis actually cited by this run (" (count cited) ")</h2>\n"
+     "    <p class=\"muted\">Collected from the <code>:basis</code> of the committed ledger facts — i.e. the citations the Governor accepted, not a bibliography. A proposal for a known op that cites nothing is a HARD block (<code>:no-spec-basis</code>).</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Jurisdiction</th><th>Code</th><th>Scope</th><th>Source</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map citation-row cited)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     "  <footer>\n"
+     "    <p class=\"muted\">Generated at build time from <code>medicaldevice.operation</code> / <code>medicaldevice.governor</code> / <code>medicaldevice.store</code>. Deterministic: no timestamps, no randomness, hash-map orders sorted — two consecutive runs are byte-identical. This actor coordinates manufacturing operations only; device release for market and regulatory certification remain the qualified person's exclusive acts.</p>\n"
+     "  </footer>\n"
+     "</main>\n"
+     "</body></html>\n")))
+
+(defn -main
+  "Regenerates the console. HARD invariant: a run that produces no
+  `:governor-hold` has not demonstrated the Governor, so the build fails
+  rather than shipping a page that only shows happy paths."
+  [& args]
+  (let [out (or (first args) "docs/samples/operator-console.html")
+        {:keys [db] :as result} (run-demo!)
+        ledger (vec (store/get-ledger db))
+        holds (filter #(= :governor-hold (:t %)) ledger)]
+    (when (zero? (count holds))
+      (throw (ex-info "render-html: the scenario produced ZERO :governor-hold facts, so the console would not demonstrate a single HARD block. Refusing to write it."
+                      {:ledger-facts (count ledger)
+                       :fact-types (frequencies (map :t ledger))})))
+    (io/make-parents out)
+    (spit out (render result))
+    (println "wrote" out
+             (str "(" (count ledger) " ledger facts, "
+                  (count holds) " HARD governor holds, "
+                  (count (filter #(= :committed (:t %)) ledger)) " commits, "
+                  (count (store/get-batches db)) " batch records)"))))

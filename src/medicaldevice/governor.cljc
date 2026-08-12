@@ -22,7 +22,10 @@
   5. Open safety deviation affecting  -- batch cannot proceed if a safety
      batch                              deviation is flagged and unresolved
 
-  Three additional checks (soft escalations to human):
+  Three additional checks (soft escalations to human -- they carry
+  `:soft true`, which is exactly what keeps them OUT of
+  `:hard-violations` and lets `medicaldevice.phase/verdict->disposition`
+  route them to ESCALATE instead of HOLD):
 
   6. Safety deviation flagged          -- `:safety/flag-deviation` ALWAYS
                                          escalates (never auto-commits)
@@ -96,7 +99,11 @@
   [{:keys [subject]} _proposal store]
   (when-let [deviation (registry/open-safety-deviation-affecting-batch store subject)]
     [{:rule :open-safety-deviation
-      :detail (str "Batch has an unresolved safety deviation: " (:detail deviation " — escalate to management."))
+      ;; NB the closing paren: `(:detail deviation " — escalate…")` would read
+      ;; the trailing clause as keyword-lookup's DEFAULT, so it could only ever
+      ;; appear when the deviation carried no detail at all.
+      :detail (str "Batch has an unresolved safety deviation: "
+                   (:detail deviation) " — escalate to management.")
       :must-escalate true}]))
 
 ;; ======================= Soft escalation checks =======================
@@ -106,6 +113,7 @@
   [{:keys [op]}]
   (when (= op :safety/flag-deviation)
     [{:rule :safety-deviation-always-escalates
+      :soft true
       :detail "Safety deviations are critical and always escalate to human management."}]))
 
 (defn- device-release-review-escalation
@@ -114,6 +122,7 @@
   [{:keys [op]}]
   (when (= op :device-release/request-review)
     [{:rule :device-release-review-always-escalates
+      :soft true
       :detail "Device release reviews are performed by the qualified person. This actor only proposes the request."}]))
 
 (defn- confidence-floor-check
@@ -121,6 +130,7 @@
   [_request proposal]
   (when (< (:confidence proposal 1.0) confidence-floor)
     [{:rule :low-confidence
+      :soft true
       :detail (str "LLM confidence " (:confidence proposal) " below floor " confidence-floor)}]))
 
 ;; ======================= Main governor check =======================
@@ -138,6 +148,11 @@
                     (safety-deviation-escalation request)
                     (device-release-review-escalation request)
                     (confidence-floor-check request proposal))
+        ;; Only violations WITHOUT `:soft` are unoverridable hard blocks.
+        ;; The three soft-escalation checks above must therefore carry
+        ;; `:soft true` -- without it every high-stakes op HOLDs and
+        ;; `:request-approval` (the human-in-the-loop node) is unreachable,
+        ;; which is the exact opposite of "always escalates to a human".
         hard-violations (filter #(not (:soft %)) violations)
         is-high-stakes (contains? high-stakes (:op request))]
     {:violations violations

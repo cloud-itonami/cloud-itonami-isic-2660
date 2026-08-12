@@ -1,6 +1,7 @@
 (ns medicaldevice.governor-test
   (:require [clojure.test :refer [deftest is]]
             [medicaldevice.governor :as governor]
+            [medicaldevice.phase :as phase]
             [medicaldevice.store :as store]
             [medicaldevice.facts :as facts]))
 
@@ -89,6 +90,57 @@
         verdict (governor/check request context proposal s)]
     (is (some #(= :low-confidence (:rule %))
               (:violations verdict)))))
+
+;; ======================= Soft vs hard: the DISPOSITION, not just the list ====
+;;
+;; The three soft checks used to be asserted only through `:violations`, which
+;; every check lands in. That hid the fact that they also landed in
+;; `:hard-violations` (nothing set `:soft`), so `verdict->disposition` HELD them
+;; and the human-in-the-loop `:request-approval` node was unreachable. Assert
+;; the disposition so the regression cannot come back silently.
+
+(deftest soft-escalations-are-not-hard-violations
+  ;; The review op runs the batch-record hard checks, so it needs a real
+  ;; seeded batch -- against an empty store it HOLDs on :batch-not-found and
+  ;; proves nothing about softness.
+  (let [s (store/sample-data! (store/mem-store))
+        seeded (:batch-id (first store/demo-batches))
+        clean {:effect :propose :value {:batch-id seeded}
+               :cites [facts/fda-21-cfr-part-820] :confidence 0.95}
+        context {:actor-id "advisor-1" :phase 3}
+        safety (governor/check {:op :safety/flag-deviation :subject seeded}
+                               context clean s)
+        review (governor/check {:op :device-release/request-review :subject seeded}
+                               context (assoc clean :value {}) s)]
+    (is (empty? (:hard-violations safety))
+        "safety-deviation-always-escalates is soft, not a hard block")
+    (is (= :escalate (phase/verdict->disposition safety))
+        "a clean safety-deviation flag must reach a human, not HOLD")
+    (is (empty? (:hard-violations review))
+        "device-release-review-always-escalates is soft, not a hard block")
+    (is (= :escalate (phase/verdict->disposition review))
+        "a clean device-release review request must reach a human, not HOLD")))
+
+(deftest low-confidence-escalates-rather-than-holds
+  (let [s (store/mem-store)
+        verdict (governor/check {:op :safety/flag-deviation :subject "batch-001"}
+                                {:actor-id "advisor-1" :phase 3}
+                                {:effect :propose :value {}
+                                 :cites [facts/iso-13485-2016] :confidence 0.4}
+                                s)]
+    (is (empty? (:hard-violations verdict)))
+    (is (= :escalate (phase/verdict->disposition verdict)))))
+
+(deftest hard-blocks-still-outrank-soft-escalations
+  (let [s (store/mem-store)
+        verdict (governor/check {:op :device-release/request-review :subject "batch-001"}
+                                {:actor-id "advisor-1" :phase 3}
+                                {:effect :propose :value {} :cites [] :confidence 0.9}
+                                s)]
+    ;; no cites + unknown batch: hard blocks fire alongside the soft escalation
+    (is (seq (:hard-violations verdict)))
+    (is (= :hold (phase/verdict->disposition verdict))
+        "a hard block must never be softened by a co-occurring escalation")))
 
 ;; ======================= Batch record validation tests =======================
 
