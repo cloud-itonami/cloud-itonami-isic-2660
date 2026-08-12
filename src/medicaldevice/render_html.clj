@@ -262,10 +262,21 @@
   nodes hand to `store/append-ledger!`."
   #{:committed :governor-hold :approval-rejected})
 
-(defn- trail-row [{:keys [thread t op subject summary by reason]}]
+(defn- trail-detail
+  "What a fact actually carries. `:approval-requested` gets the confidence
+  appended because `medicaldevice.phase/gate` hands back the SAME reason
+  string for every escalation -- see the note under the trail table."
+  [{:keys [t summary by reason violations confidence]}]
+  (case t
+    :approval-requested (str reason " (confidence " confidence ")")
+    :approval-granted (str "approved by " by)
+    (:governor-hold :approval-rejected) (rules-of {:violations violations})
+    (or summary "")))
+
+(defn- trail-row [{:keys [thread t op subject] :as fact}]
   (format "        <tr><td><code>%s</code></td><td>%s</td><td><code>%s</code></td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>"
           (esc thread) (esc (name t)) (esc op) (esc subject)
-          (esc (or summary by reason ""))
+          (esc (trail-detail fact))
           (if (persisted-facts t)
             "<span class=\"ok\">persisted</span>"
             "<span class=\"warn\">in-run only</span>")))
@@ -334,8 +345,9 @@
      "  <section class=\"card\">\n"
      "    <h2>HARD governor holds this run (" (count holds) ")</h2>\n"
      "    <p class=\"muted\">Every row below was refused before any human was offered an override, and nothing was written to the SSoT. The build fails if this section is empty — see <code>-main</code>.</p>\n"
+     "    <p class=\"muted\"><strong>Read the rule column carefully.</strong> <code>medicaldevice.governor/hold-fact</code> writes <em>all</em> violations and strips the <code>:soft</code> marker on the way to the ledger, so where a soft escalation happened to co-occur with the hard rule that caused the hold (rows 2 and 6), the ledger fact records both and can no longer tell them apart. They are listed here exactly as recorded — a second rule on a row is not a second hard block.</p>\n"
      "    <table>\n"
-     "      <thead><tr><th>Op</th><th>Subject</th><th>Rule</th><th>Detail</th></tr></thead>\n"
+     "      <thead><tr><th>Op</th><th>Subject</th><th>Rules recorded on the hold</th><th>Detail</th></tr></thead>\n"
      "      <tbody>\n"
      (str/join "\n" (map hold-row holds)) "\n"
      "      </tbody>\n"
@@ -370,6 +382,7 @@
      "  <section class=\"card\">\n"
      "    <h2>Full run trail, thread by thread (" (count trail) " facts)</h2>\n"
      "    <p class=\"muted\">One thread = one supervised operation. Note the “in-run only” rows: <code>:advisor-proposed</code>, <code>:approval-requested</code> and <code>:approval-granted</code> live in the graph's <code>:audit</code> channel and are handed to the checkpointer, but <code>medicaldevice.operation</code> never appends them to the Store's ledger — so the proposal that preceded a commit, and the approver who released it, are not recoverable from the SSoT alone. Stated rather than papered over.</p>\n"
+     "    <p class=\"muted\">Two further things this table shows as they are, not as they should be. (1) Every <code>:approval-requested</code> reason reads “high-stakes action requires human approval”, including <code>b1-maint</code>, which was <em>not</em> high-stakes — it escalated on the confidence floor (0.4 &lt; " governor/confidence-floor "). <code>medicaldevice.phase/gate</code> returns one reason string for all escalations, and <code>operation</code>'s <code>(or reason …)</code> fallback that would have classified it <code>:low-confidence</code> is therefore unreachable; the confidence in brackets is the fact's own value. (2) <code>b3-safety</code> committed a safety-deviation flag, but <code>medicaldevice.store/Store</code> has no write path for deviations — <code>commit-record!</code> writes the proposal's <code>:value</code> into the batch table under the subject key. The proposal carried <code>batch-2660-003</code>'s record unchanged, so the flag exists only as the ledger facts above. No deviation row was fabricated to make it look otherwise, which is why <code>batch-2660-003</code> still shows “none open”.</p>\n"
      "    <table>\n"
      "      <thead><tr><th>Thread</th><th>Fact</th><th>Op</th><th>Subject</th><th>Detail</th><th>Ledger</th></tr></thead>\n"
      "      <tbody>\n"
