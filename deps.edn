@@ -19,7 +19,7 @@
   :dev {:override-deps
         {io.github.kotoba-lang/langchain
          {:local/root "../../kotoba-lang/langchain"}}}
-  ;; clojure -M:dev:render-html [out-file]
+  ;; kbb -M:dev:render-html [out-file]
   ;; -> regenerate docs/samples/operator-console.html by driving the REAL
   ;;    actor graph (flagship checklist item 2). Fails the build if the
   ;;    scenario produces no HARD governor hold.
