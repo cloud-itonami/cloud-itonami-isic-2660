@@ -1,5 +1,5 @@
 (ns medicaldevice.governor-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [medicaldevice.governor :as governor]
             [medicaldevice.phase :as phase]
             [medicaldevice.store :as store]
