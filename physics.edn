@@ -1,0 +1,33 @@
+;; What this vertical's robot physically does, declared for
+;; kotoba.robotics.process (kotoba-lang/robotics). `kbb -M:dev:physics` runs it.
+;;
+;; README "Robotics premise": robots (assembly, calibration, inspection)
+;; operate under an actor and an independent Medical Device Governor that
+;; never releases a device batch itself. The robots' physical work measured
+;; here: loading reusable device housings into the steam steriliser and
+;; waiting until the inner wall has reached sterilising temperature, and
+;; placing a device into the inspection fixture.
+;;
+;; Every number without a cited source is marked `estimate` in its :basis.
+{:physics/schema "itonami.physical-ai.spec.v1"
+ :repo "cloud-itonami/cloud-itonami-isic-2660"
+ :cases
+ [{:id :steam-steriliser-wall-heat-up
+   :kind :thermal
+   :procedure "a polysulfone device housing sits in 134 C saturated steam until its inner wall reaches 121 C (condensing steam outside, insulated inner air side)"
+   :params {:conductivity-w-mk 0.26 :density-kg-m3 1240.0 :specific-heat-j-kgk 1200.0
+            :t0-c 20.0 :t-hot-c 134.0 :h-front-w-m2k 1000.0 :h-back-w-m2k 0.0
+            :threshold-c 121.0 :duration-s 1800.0 :nodes 6}
+   :sweep {:param :thickness-m :values [0.001 0.002 0.003 0.004 0.005]}
+   :quantity :time-to-threshold-s
+   :limit {:max 180.0 :basis "estimate: the inner wall must be at temperature within the first 3 minutes of a short 134 C hold; condensing-steam h of 1000 W/m2K and the polysulfone properties are estimates"}
+   :boundary {:lo 0.0005 :hi 0.008}}
+  {:id :device-into-inspection-fixture
+   :kind :manipulator
+   :procedure "arm places an assembled device (handheld monitor to infusion pump) into the final-inspection fixture"
+   :params {:l1-m 0.45 :l2-m 0.40 :m1-kg 4.0 :m2-kg 2.5
+            :from [0.55 0.05] :to [0.20 0.45] :duration-s 2.0 :steps 400}
+   :sweep {:param :payload-kg :values [0.2 0.5 1.0 2.5 4.0]}
+   :quantity :peak-tau1-nm
+   :limit {:max 45.0 :basis "estimate: continuous shoulder torque of a ~5 kg-class collaborative arm, derated for a cleanroom cell"}
+   :boundary {:lo 0.1 :hi 30.0}}]}
