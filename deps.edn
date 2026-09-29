@@ -18,7 +18,7 @@
         io.github.kotoba-lang/robotics
         {:local/root "../../kotoba-lang/robotics"}
         ;; デジタル庁デザインシステム -- the workspace-wide base design
-        ;; system (CLAUDE.md, 2026-08-05). Used only by
+        ;; system (AGENTS.md, 2026-08-05). Used only by
         ;; `medicaldevice.render-html` to inline the console's CSS.
         io.github.kotoba-lang/jp-go-digital-design-system
         {:git/url "https://github.com/kotoba-lang/jp-go-digital-design-system"
